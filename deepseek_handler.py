@@ -76,7 +76,7 @@ try:
     genai.configure(api_key=GEMINI_API_KEY)
     
     # Use gemini-1.5-flash without system instruction for direct JSON output
-    gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+    gemini_model = genai.GenerativeModel('gemini-2.5-flash')
     print(f"[OK] Gemini API configured (Model: gemini-1.5-flash, Key: {GEMINI_API_KEY[:10]}...)")
     
 except Exception as e:
