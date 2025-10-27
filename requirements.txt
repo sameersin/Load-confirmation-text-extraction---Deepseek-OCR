@@ -1,0 +1,37 @@
+# DeepSeek-OCR Requirements
+# Exact versions from working Colab notebook
+
+# Core ML libraries (MUST install torch first with CUDA support)
+torch==2.6.0
+torchvision==0.21.0
+torchaudio==2.6.0
+
+# Transformers ecosystem
+transformers==4.46.3
+tokenizers==0.20.3
+
+# Model dependencies
+einops
+addict
+easydict
+
+# Image processing
+Pillow
+pdf2image
+
+# OCR utilities
+pytesseract
+
+# Optimization
+bitsandbytes
+accelerate
+
+# Document processing
+PyMuPDF
+img2pdf
+
+# API
+google-generativeai
+
+# RunPod serverless
+runpod
