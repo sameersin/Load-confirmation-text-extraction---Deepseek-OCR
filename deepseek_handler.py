@@ -1,7 +1,6 @@
 """
-DeepSeek-OCR RunPod Handler
-Simple, clean implementation for serverless deployment
-Author: Based on existing handler pattern
+DeepSeek-OCR RunPod Handler - FIXED VERSION
+Addresses Gemini API response errors and markdown capture issues
 """
 
 import runpod
@@ -11,19 +10,18 @@ import json
 import re
 import base64
 import torch
+import glob
 from PIL import Image
 from pdf2image import convert_from_bytes
 from transformers import AutoModel, AutoTokenizer
 import google.generativeai as genai
 
 # ============================================================================
-# GLOBAL MODEL INITIALIZATION (runs once when container starts)
+# GLOBAL MODEL INITIALIZATION
 # ============================================================================
-
 
 print("Initializing DeepSeek-OCR Model...")
 
-# Check GPU availability first
 if torch.cuda.is_available():
     gpu_name = torch.cuda.get_device_name(0)
     gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
@@ -31,13 +29,12 @@ if torch.cuda.is_available():
 else:
     print("[WARNING] No GPU detected!")
 
-# Load DeepSeek-OCR model
 try:
     import time
     start_time = time.time()
     
     MODEL_NAME = "deepseek-ai/DeepSeek-OCR"
-    print(f"[INFO] Downloading/Loading tokenizer from {MODEL_NAME}...")
+    print(f"[INFO] Loading tokenizer from {MODEL_NAME}...")
     
     tokenizer = AutoTokenizer.from_pretrained(
         MODEL_NAME,
@@ -45,7 +42,7 @@ try:
     )
     print(f"[OK] Tokenizer loaded ({time.time() - start_time:.1f}s)")
     
-    print(f"[INFO] Loading pre-downloaded model...")
+    print(f"[INFO] Loading model...")
     model_start = time.time()
     
     model = AutoModel.from_pretrained(
@@ -53,40 +50,37 @@ try:
         trust_remote_code=True,
         torch_dtype=torch.bfloat16,
         device_map="cuda",
-        local_files_only=True  
+        local_files_only=True
     )
     model = model.eval()
     
     print(f"[OK] Model loaded ({time.time() - model_start:.1f}s)")
-    print(f"[OK] Total initialization time: {time.time() - start_time:.1f}s")
+    print(f"[OK] Total initialization: {time.time() - start_time:.1f}s")
     
 except Exception as e:
-    print(f"[ERROR] Error initializing DeepSeek-OCR model: {str(e)}")
+    print(f"[ERROR] Model initialization failed: {str(e)}")
     import traceback
     print(traceback.format_exc())
     raise
 
-# Initialize Gemini API
+# Initialize Gemini
 try:
     GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
     if not GEMINI_API_KEY:
-        print("[ERROR] GEMINI_API_KEY not found in environment variables!")
-        raise ValueError("GEMINI_API_KEY not found in environment variables")
+        raise ValueError("GEMINI_API_KEY not found in environment")
     
     genai.configure(api_key=GEMINI_API_KEY)
-    
-    # Use gemini-1.5-flash without system instruction for direct JSON output
-    gemini_model = genai.GenerativeModel('gemini-2.5-flash')
-    print(f"[OK] Gemini API configured (Model: gemini-1.5-flash, Key: {GEMINI_API_KEY[:10]}...)")
+    GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+    gemini_model = genai.GenerativeModel(GEMINI_MODEL)
+    print(f"[OK] Gemini configured (Model: {GEMINI_MODEL}, Key: {GEMINI_API_KEY[:10]}...)")
     
 except Exception as e:
-    print(f"[ERROR] Error initializing Gemini: {str(e)}")
-    import traceback
-    print(traceback.format_exc())
+    print(f"[ERROR] Gemini initialization failed: {str(e)}")
     raise
 
-print("All models loaded. Ready to process PDFs!")
-
+print("="*70)
+print("All models loaded. Ready to process!")
+print("="*70 + "\n")
 
 
 # ============================================================================
@@ -96,12 +90,7 @@ print("All models loaded. Ready to process PDFs!")
 def pdf_to_images(pdf_bytes, dpi=200):
     """Convert PDF to images"""
     try:
-        images = convert_from_bytes(
-            pdf_bytes,
-            dpi=dpi,
-            fmt='png'
-        )
-        # Ensure RGB format
+        images = convert_from_bytes(pdf_bytes, dpi=dpi, fmt='png')
         images = [img.convert("RGB") for img in images]
         return images
     except Exception as e:
@@ -109,62 +98,80 @@ def pdf_to_images(pdf_bytes, dpi=200):
 
 
 def extract_markdown_from_images(images, output_path="/tmp/"):
+    """Combine all PDF pages into one tall image and run eval_mode=True."""
+    import uuid
+    from PIL import Image
 
-    temp_image_path = f"{output_path}temp_image.jpg"
-    
-    if len(images) == 1:
-        images[0].save(temp_image_path)
-    else:
-        images[0].save(temp_image_path)
-    
-    print(f"Processing {len(images)} page(s)...")
-    
+    unique_id = str(uuid.uuid4())[:8]
+    temp_dir = f"{output_path}ocr_{unique_id}/"
+    os.makedirs(temp_dir, exist_ok=True)
+    print(f"[DEBUG] temp_dir: {temp_dir}")
 
-    model.infer(
+    # Normalize widths and stack vertically
+    widths = [im.width for im in images]
+    max_w = max(widths)
+    resized = []
+    total_h = 0
+    for im in images:
+        if im.width != max_w:
+            new_h = int(im.height * (max_w / im.width))
+            im = im.resize((max_w, new_h), Image.BILINEAR)
+        resized.append(im)
+        total_h += im.height
+
+    combined = Image.new("RGB", (max_w, total_h), color=(255, 255, 255))
+    y = 0
+    for im in resized:
+        combined.paste(im, (0, y))
+        y += im.height
+
+    combined_path = f"{temp_dir}combined_load_confirmation.jpg"
+    combined.save(combined_path, quality=95)
+    print(f"[DEBUG] combined image saved: {combined_path} ({max_w}x{total_h})")
+
+    # Single inference using eval_mode=True to get string output
+    res = model.infer(
         tokenizer,
-        prompt="<image>\nConvert to structuredmarkdown.",
-        image_file=temp_image_path,
-        output_path=output_path,
-        base_size=640,
+        prompt="<image>\nConvert to markdown.",
+        image_file=combined_path,
+        base_size=1024,
         image_size=640,
         crop_mode=True,
-        save_results=True,
-        test_compress=False
+        save_results=False,
+        test_compress=False,
+        eval_mode=True
     )
-    
-    # Read the generated markdown file
-    result_file = f"{output_path}result.mmd"
-    with open(result_file, 'r') as f:
-        markdown_text = f.read()
-    
-    print(f"Extracted {len(markdown_text)} characters")
-    
-    return markdown_text
+    text = str(res).strip()
+
+    try:
+        import shutil
+        shutil.rmtree(temp_dir, ignore_errors=True)
+    except Exception as e:
+        print(f"[WARNING] cleanup failed: {e}")
+
+    print(f"Extracted {len(text)} characters (combined)")
+    return text
 
 
 def extract_json_with_gemini(markdown_text):
-    extraction_prompt = f"""You are an expert load confirmation analyst with over 10 years of experience as a dispatcher and broker in the trucking industry. You are thoroughly familiar with all possible terminologies used in load confirmation, dispatch, and rate agreement documents—including synonyms and alternate phrasing (for instance, "commodity" can also appear as "goods" or "product"; "carrier pay" as "freight rate" or "total payment"; etc.). Your role is to ensure that not a single piece of critical information is missed, regardless of wording, layout variation, or format.
+    """
+    Extract JSON using Gemini with ROBUST error handling
+    FIXED: Properly handles response.text errors and safety blocks
+    """
+    
 
-Your task is:
+    MAX_CHARS = 100000
+    if len(markdown_text) > MAX_CHARS:
+        print(f"[WARNING] Markdown too long ({len(markdown_text)} chars), truncating to {MAX_CHARS}")
+        markdown_text = markdown_text[:MAX_CHARS] + "\n\n[TRUNCATED]"
+    
+    extraction_prompt = f"""You are an expert load confirmation analyst. Extract data from this trucking document.
 
-Given the following Markdown-formatted text extracted from a load confirmation, rate confirmation, or dispatch document:
-
-Identify and extract every key data point required for carrier load execution and payment, even if fields are phrased differently or appear in varied order.
-
-Ensure you cross-reference synonymous terms and do not overlook information if it appears under a different label.
-
-Omit no critical details that would impact payment, scheduling, claims, compliance, or operational clarity.
-
-Strictly avoid inventing or hallucinating values. If a field is not present in the document, output an empty string, array, or object as appropriate.
-
-tip: Have total grasp of the whole extracted data, so try to understand what is what and correctly fit in the JSON structure even the text is far away from.
-
-Present the output exactly in the following JSON structure (and nothing else—no commentary, explanation, or extra text):
-
-OCR EXTRACTED TEXT:
+OCR MARKDOWN:
 {markdown_text}
 
-REQUIRED JSON SCHEMA:
+Extract information into this EXACT JSON structure (output ONLY valid JSON, no markdown, no code blocks):
+
 {{
   "load_details": {{
     "broker_name": "",
@@ -233,39 +240,88 @@ REQUIRED JSON SCHEMA:
   }}
 }}
 
-Extract the information and respond with ONLY valid JSON. No markdown formatting, no code blocks, no explanations.
-"""
+Rules:
+- Extract ALL information present in the document
+- If a field is missing, use empty string/array/object
+- Output ONLY valid JSON, nothing else"""
     
     try:
-        # Generate content with NO safety filters - direct JSON output only
+        # Configure safety settings using enums (SDK-compliant)
+        from google.generativeai.types import HarmCategory, HarmBlockThreshold
+        safety_settings = {
+            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+        }
+        
         response = gemini_model.generate_content(
             extraction_prompt,
             generation_config=genai.types.GenerationConfig(
                 temperature=0.0,
                 max_output_tokens=4096,
                 response_mime_type="application/json",
-            )
+            ),
+            safety_settings=safety_settings
         )
         
-        # Get the response text directly
-        extracted_text = response.text.strip()
+        # FIX: Robust response handling
+        # Check if response was blocked
+        if not response.candidates:
+            print("[ERROR] Gemini blocked the response (no candidates)")
+            return {
+                "error": "Gemini safety filter blocked response",
+                "prompt_feedback": str(response.prompt_feedback) if hasattr(response, 'prompt_feedback') else "Unknown"
+            }
         
-        # Clean JSON response
+        # Check if candidate was blocked
+        candidate = response.candidates[0]
+        if hasattr(candidate, 'finish_reason') and candidate.finish_reason.name == 'SAFETY':
+            print(f"[ERROR] Gemini blocked due to safety: {candidate.safety_ratings}")
+            return {
+                "error": "Content blocked by Gemini safety filters",
+                "safety_ratings": str(candidate.safety_ratings)
+            }
+        
+        # Try to get text from response
+        try:
+            extracted_text = response.text.strip()
+        except ValueError as e:
+            # response.text failed, try accessing parts directly
+            print(f"[WARNING] response.text failed: {e}")
+            if candidate.content and candidate.content.parts:
+                extracted_text = candidate.content.parts[0].text.strip()
+            else:
+                print("[ERROR] No valid text in response")
+                return {
+                    "error": "No valid text returned by Gemini",
+                    "finish_reason": candidate.finish_reason.name if hasattr(candidate, 'finish_reason') else "Unknown"
+                }
+        
+        # Clean JSON response (remove markdown code blocks if present)
         if extracted_text.startswith("```json"):
             extracted_text = extracted_text.replace("```json", "").replace("```", "").strip()
         elif extracted_text.startswith("```"):
             extracted_text = extracted_text.replace("```", "").strip()
         
-        # Parse and return JSON only
+        # Parse JSON
         extracted_data = json.loads(extracted_text)
         return extracted_data
         
     except json.JSONDecodeError as e:
         print(f"[ERROR] JSON parsing failed: {e}")
-        return {"error": f"JSON parsing error: {str(e)}"}
+        print(f"Raw response: {extracted_text[:500]}...")
+        return {
+            "error": f"JSON parsing error: {str(e)}",
+            "raw_response": extracted_text[:1000]
+        }
     except Exception as e:
-        print(f"Gemini API error: {e}")
-        raise
+        print(f"[ERROR] Gemini API error: {e}")
+        import traceback
+        print(traceback.format_exc())
+        return {
+            "error": f"Gemini error: {str(e)}"
+        }
 
 
 # ============================================================================
@@ -273,66 +329,123 @@ Extract the information and respond with ONLY valid JSON. No markdown formatting
 # ============================================================================
 
 def handler(event):
-
+    """Main RunPod handler"""
+    
+    print("\n" + "="*70)
+    print("NEW REQUEST")
+    print("="*70)
+    
     try:
         job_input = event["input"]
-
+        
+        # Validate input
         if "base64_pdf" not in job_input:
             return {
                 "success": False,
                 "data": None,
-                "error": "No PDF data provided. Please provide 'base64_pdf' in input."
+                "error": "Missing 'base64_pdf' in input"
             }
-
+        
+        # Get parameters
         dpi = job_input.get("dpi", 200)
         return_markdown = job_input.get("return_markdown", False)
-
+        
+        # Step 1: Decode PDF
         try:
             pdf_bytes = base64.b64decode(job_input["base64_pdf"])
-            print(f"Decoded PDF ({len(pdf_bytes)} bytes)")
+            print(f"[1/4] PDF decoded ({len(pdf_bytes)} bytes)")
         except Exception as e:
             return {
                 "success": False,
                 "data": None,
-                "error": f"Invalid base64 PDF data: {str(e)}"
+                "error": f"Invalid base64: {str(e)}"
             }
         
-        # Step 2: Convert PDF to images
-        images = pdf_to_images(pdf_bytes, dpi=dpi)
-        print(f"Converted to {len(images)} images (DPI: {dpi})")
+        # Step 2: Convert to images
+        try:
+            images = pdf_to_images(pdf_bytes, dpi=dpi)
+            print(f"[2/4] Converted to {len(images)} image(s) (DPI: {dpi})")
+        except Exception as e:
+            return {
+                "success": False,
+                "data": None,
+                "error": f"PDF conversion failed: {str(e)}"
+            }
         
-        # Step 3: Extract markdown using DeepSeek-OCR
-        # Use /tmp/ for temporary files on RunPod
-        markdown_text = extract_markdown_from_images(images, output_path="/tmp/")
-        print(f"OCR completed ({len(markdown_text)} characters)")
+        # Step 3: DeepSeek OCR
+        try:
+            markdown_text = extract_markdown_from_images(images, output_path="/tmp/")
+            print(f"[3/4] OCR completed ({len(markdown_text)} chars)")
+            
+            if not markdown_text or len(markdown_text) < 10:
+                print("[WARNING] Markdown is empty or too short!")
+                return {
+                    "success": False,
+                    "data": None,
+                    "error": "OCR produced no output"
+                }
+                
+        except Exception as e:
+            print(f"[ERROR] OCR failed: {e}")
+            import traceback
+            print(traceback.format_exc())
+            return {
+                "success": False,
+                "data": None,
+                "error": f"OCR failed: {str(e)}"
+            }
         
-        # Step 4: Extract JSON using Gemini
-        extracted_data = extract_json_with_gemini(markdown_text)
-        print(f"JSON extraction completed")
+        # Step 4: Gemini JSON extraction
+        try:
+            extracted_data = extract_json_with_gemini(markdown_text)
+            print(f"[4/4] Gemini extraction completed")
+            
+            # Check if extraction failed
+            if "error" in extracted_data:
+                print(f"[WARNING] Gemini returned error: {extracted_data['error']}")
+                # Still return the response, but mark as partial failure
+                return {
+                    "success": False,
+                    "data": extracted_data,
+                    "error": "Gemini extraction failed",
+                    "markdown": markdown_text if return_markdown else None
+                }
+                
+        except Exception as e:
+            print(f"[ERROR] Gemini failed: {e}")
+            import traceback
+            print(traceback.format_exc())
+            return {
+                "success": False,
+                "data": None,
+                "error": f"Gemini failed: {str(e)}",
+                "markdown": markdown_text if return_markdown else None
+            }
         
-        # Prepare response
+        # Prepare successful response
         response = {
             "success": True,
             "data": extracted_data,
             "error": None
         }
         
-        # Optionally include markdown
         if return_markdown:
             response["markdown"] = markdown_text
         
         print("="*70)
-        print("Processing complete!")
+        print("✓ SUCCESS")
         print("="*70 + "\n")
         
         return response
         
     except Exception as e:
-        print(f"Error: {str(e)}")
+        print(f"[CRITICAL ERROR] {str(e)}")
+        import traceback
+        print(traceback.format_exc())
         return {
             "success": False,
             "data": None,
-            "error": str(e)
+            "error": f"Critical error: {str(e)}"
         }
 
 
@@ -341,5 +454,7 @@ def handler(event):
 # ============================================================================
 
 if __name__ == "__main__":
+    print("\n" + "="*70)
+    print("STARTING RUNPOD SERVERLESS HANDLER")
+    print("="*70 + "\n")
     runpod.serverless.start({"handler": handler})
-
