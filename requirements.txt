@@ -2,9 +2,9 @@
 # Exact versions from working Colab notebook
 
 # Core ML libraries (MUST install torch first with CUDA support)
-torch==2.6.0
-torchvision==0.21.0
-torchaudio==2.6.0
+torch==2.5.1
+torchvision==0.20.1
+torchaudio==2.5.1
 
 # Transformers ecosystem
 transformers==4.46.3
@@ -19,15 +19,11 @@ easydict
 Pillow
 pdf2image
 
-# OCR utilities
-pytesseract
-
 # Optimization
 bitsandbytes
 accelerate
 
-# Document processing
-PyMuPDF
+# Document processing (keep minimal; avoid disallowed OCR libs)
 img2pdf
 
 # API
