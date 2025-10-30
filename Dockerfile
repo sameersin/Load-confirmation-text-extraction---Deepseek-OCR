@@ -5,13 +5,22 @@ FROM runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04
 
 WORKDIR /app
 
-# Install system dependencies
+# Install system dependencies including poppler for PDF rendering
 RUN apt-get update && apt-get install -y \
+    python3.10 \
+    python3-pip \
+    git \
+    wget \
     poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
+# Install system dependencies
+
 # Copy requirements
 COPY requirements.txt .
+
+# Upgrade pip
+RUN python3 -m pip install --upgrade pip
 
 # Install Python packages
 RUN pip install --no-cache-dir -r requirements.txt
