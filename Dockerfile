@@ -3,7 +3,6 @@
 
 FROM runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04
 
-# Set working directory
 WORKDIR /app
 
 # Install system dependencies
@@ -23,13 +22,18 @@ RUN pip install flash-attn==2.7.3 --no-build-isolation || echo "Flash attention 
 # Copy handler script
 COPY deepseek_handler.py .
 
-# Pre-download the DeepSeek-OCR model during build
+# Pre-download the DeepSeek-OCR model during build (matches handler loading)
 RUN python -c "\
 import torch; \
 from transformers import AutoModel, AutoTokenizer; \
 print('Pre-downloading DeepSeek-OCR model...'); \
 tokenizer = AutoTokenizer.from_pretrained('deepseek-ai/DeepSeek-OCR', trust_remote_code=True); \
-model = AutoModel.from_pretrained('deepseek-ai/DeepSeek-OCR', trust_remote_code=True, use_safetensors=True); \
+model = AutoModel.from_pretrained(\
+    'deepseek-ai/DeepSeek-OCR', \
+    trust_remote_code=True, \
+    torch_dtype=torch.bfloat16, \
+    device_map='auto' \
+); \
 print('Model pre-downloaded successfully!')"
 
 # Set environment variables
@@ -37,4 +41,3 @@ ENV PYTHONUNBUFFERED=1
 
 # RunPod will automatically call the handler
 CMD ["python", "-u", "deepseek_handler.py"]
-
