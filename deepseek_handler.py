@@ -119,12 +119,23 @@ def extract_json_with_gemini(markdown_text):
     if len(markdown_text) > 100000:
         markdown_text = markdown_text[:100000]
     
-    prompt = f"""Extract data from this trucking load confirmation document.
+    prompt = f"""
+You are an expert load confirmation analyst with over 10 years of experience as a dispatcher and broker in the trucking industry. You are thoroughly familiar with all possible terminologies used in load confirmation, dispatch, and rate agreement documents—including synonyms and alternate phrasing (for instance, "commodity" can also appear as "goods" or "product"; "carrier pay" as "freight rate" or "total payment"; etc.). Your role is to ensure that not a single piece of critical information is missed, regardless of wording, layout variation, or format.
 
-OCR MARKDOWN:
-{markdown_text}
+Your task is:
 
-Return ONLY valid JSON in this structure:
+Given the following Markdown-formatted text extracted from a load confirmation, rate confirmation, or dispatch document:
+
+Identify and extract every key data point required for carrier load execution and payment, even if fields are phrased differently or appear in varied order.
+
+Ensure you cross-reference synonymous terms and do not overlook information if it appears under a different label.
+
+Omit no critical details that would impact payment, scheduling, claims, compliance, or operational clarity.
+
+Strictly avoid inventing or hallucinating values. If a field is not present in the document, output an empty string, array, or object as appropriate.
+tip : Have total grasp of the whole extracted data, so try to understand what is what and correctly fit in the JSON structure even the text is far away from.
+
+Present the output exactly in the following JSON structure (and nothing else—no commentary, explanation, or extra text):
 
 {{
   "load_details": {{
@@ -195,9 +206,21 @@ Return ONLY valid JSON in this structure:
 }}
 
 Rules:
-- Extract ALL information from the document
-- Use empty string/array/object for missing fields
-- Output ONLY valid JSON"""
+
+Fill each field only if the information is explicitly listed, regardless of the label or location.
+
+Leave fields blank (empty string, array, or object) if not present.
+
+Do not output any extra text—only the JSON as specified above.
+
+Prioritize accuracy and completeness, accounting for all synonym variations and industry-specific language.
+
+This will ensure consistent, comprehensive, and error-free extraction of critical load information across any truckload document.
+
+OCR MARKDOWN:
+{markdown_text}
+
+"""
     
     from google.generativeai.types import HarmCategory, HarmBlockThreshold
     
@@ -281,7 +304,7 @@ def handler(event):
         
         extracted_data = extract_json_with_gemini(markdown_text)
         print(f"[4/4] Extraction complete")
-        
+        print(extracted_data)
         if "error" in extracted_data:
             return {
                 "success": False,
